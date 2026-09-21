@@ -16,21 +16,28 @@
     </properties>
 
     <dependencies>
-        <!-- [VULN-05] Dependencia con CVE conocido (CWE-1035 / OWASP A06:2021).
-             Log4j 2.14.1 es vulnerable a Log4Shell (CVE-2021-44228, Critical)
-             y a CVE-2021-45046 / CVE-2021-45105. Fijada a propósito como baseline. -->
+        <!-- [FIX-05] Log4j actualizado a una versión parcheada.
+             Elimina Log4Shell (CVE-2021-44228), CVE-2021-45046, CVE-2021-45105
+             y el CVE-2026-49844 de log4j-api. Mata los 9 hallazgos del SCA. -->
         <dependency>
             <groupId>org.apache.logging.log4j</groupId>
             <artifactId>log4j-core</artifactId>
-            <version>2.14.1</version>
+            <version>2.25.5</version>
         </dependency>
         <dependency>
             <groupId>org.apache.logging.log4j</groupId>
             <artifactId>log4j-api</artifactId>
-            <version>2.14.1</version>
+            <version>2.25.5</version>
         </dependency>
 
-        <!-- Driver SQLite para el ejemplo de SQL Injection -->
+        <!-- [FIX-04] bcrypt para hashing de contraseñas (reemplaza a MD5). -->
+        <dependency>
+            <groupId>org.mindrot</groupId>
+            <artifactId>jbcrypt</artifactId>
+            <version>0.4</version>
+        </dependency>
+
+        <!-- Driver SQLite -->
         <dependency>
             <groupId>org.xerial</groupId>
             <artifactId>sqlite-jdbc</artifactId>

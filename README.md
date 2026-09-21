@@ -1,4 +1,4 @@
-# Vulnerable app — Laboratorio 04 FDSI (fase SAST)
+# Vulnerable-app — Laboratorio 04 FDSI (fase SAST)
 
 Aplicación **deliberadamente vulnerable** creada para el ejercicio de Static
 Application Security Testing (SAST) del Laboratorio 04. Contiene fallos plantados

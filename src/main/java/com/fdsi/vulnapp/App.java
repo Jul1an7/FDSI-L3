@@ -4,6 +4,7 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.mindrot.jbcrypt.BCrypt;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -11,30 +12,30 @@ import java.net.InetSocketAddress;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.security.MessageDigest;
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.UUID;
+import java.util.regex.Pattern;
 
 /**
- * App deliberadamente vulnerable para el Laboratorio 04 (FDSI) — fase SAST.
- * NO usar en producción. Cada fallo está marcado con [VULN-0X].
+ * Versión REMEDIADA de la app del Laboratorio 04 (FDSI) — fase SAST.
+ * Fallos OWASP corregidos (FIX-01..06) + calidad de código (SonarQube).
  */
 public class App {
 
     private static final Logger log = LogManager.getLogger(App.class);
-
-    // [VULN-03] Secreto hardcodeado (CWE-798 / OWASP A07:2021).
-    // Una credencial/clave jamas debe vivir en el codigo fuente ni en el repo.
-    private static final String API_KEY = "sk_live_51H8xQe2eZvKYlo8CkL9m3nOpQrStUvWxYz";
-
+    private static final Pattern HOST_OK = Pattern.compile("^[a-zA-Z0-9.\\-]{1,253}$");
     private static Connection conn;
 
-    public static void main(String[] args) throws Exception {
+    public static void main(String[] args) throws IOException, SQLException {
         initDb();
         HttpServer server = HttpServer.create(new InetSocketAddress(8080), 0);
         server.createContext("/login", App::handleLogin);
@@ -42,81 +43,88 @@ public class App {
         server.createContext("/file", App::handleFile);
         server.setExecutor(null);
         server.start();
-        // Se registra la API_KEY en el log: mala practica adicional (secreto en logs).
-        log.info("Servidor arrancado en http://localhost:8080 con API_KEY=" + API_KEY);
+        log.info("Servidor arrancado en http://localhost:8080");
     }
 
-    private static void initDb() throws Exception {
+    private static void initDb() throws SQLException {
         conn = DriverManager.getConnection("jdbc:sqlite:app.db");
-        Statement st = conn.createStatement();
-        st.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT, password TEXT)");
-        // password = MD5('admin123') = 0192023a7bbd73250516f069df18b500
-        st.execute("INSERT INTO users (username, password) "
-                + "SELECT 'admin', '0192023a7bbd73250516f069df18b500' "
-                + "WHERE NOT EXISTS (SELECT 1 FROM users WHERE username = 'admin')");
-        st.close();
+        try (Statement st = conn.createStatement()) {
+            st.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT, password TEXT)");
+        }
+
+        boolean exists;
+        try (PreparedStatement check = conn.prepareStatement("SELECT 1 FROM users WHERE username = ?")) {
+            check.setString(1, "admin");
+            try (ResultSet rs = check.executeQuery()) {
+                exists = rs.next();
+            }
+        }
+
+        if (!exists) {
+            String adminPass = System.getenv().getOrDefault("ADMIN_PASSWORD", "");
+            if (adminPass.isEmpty()) {
+                adminPass = UUID.randomUUID().toString();
+                log.warn("ADMIN_PASSWORD no definida; se generó una contraseña temporal aleatoria.");
+            }
+            String hash = BCrypt.hashpw(adminPass, BCrypt.gensalt());
+            try (PreparedStatement ins = conn.prepareStatement("INSERT INTO users (username, password) VALUES (?, ?)")) {
+                ins.setString(1, "admin");
+                ins.setString(2, hash);
+                ins.executeUpdate();
+            }
+        }
     }
 
-    // ---- /login : SQL Injection + hashing debil ----
+
     private static void handleLogin(HttpExchange ex) throws IOException {
         Map<String, String> q = parseQuery(ex.getRequestURI().getRawQuery());
         String user = q.getOrDefault("user", "");
         String pass = q.getOrDefault("pass", "");
         try {
-            // [VULN-04] Hashing debil con MD5 (CWE-327 / OWASP A02:2021).
-            // MD5 es rapido y esta roto para passwords; deberia ser bcrypt/argon2.
-            String hashed = md5(pass);
-
-            // [VULN-01] SQL Injection por concatenacion (CWE-89 / OWASP A03:2021).
-            // La entrada del usuario entra sin sanear a la consulta.
-            String sql = "SELECT * FROM users WHERE username = '" + user
-                    + "' AND password = '" + hashed + "'";
-            Statement st = conn.createStatement();
-            ResultSet rs = st.executeQuery(sql);
-            String resp = rs.next() ? "Login OK" : "Login FAILED";
-            rs.close();
-            st.close();
-            respond(ex, 200, resp);
-        } catch (Exception e) {
-            respond(ex, 500, "error: " + e.getMessage());
+            boolean ok = false;
+            try (PreparedStatement ps = conn.prepareStatement("SELECT password FROM users WHERE username = ?")) {
+                ps.setString(1, user);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) {
+                        ok = BCrypt.checkpw(pass, rs.getString("password"));
+                    }
+                }
+            }
+            respond(ex, 200, ok ? "Login OK" : "Login FAILED");
+        } catch (SQLException e) {
+            respond(ex, 500, "error");
         }
     }
 
-    // ---- /ping : Command Injection ----
     private static void handlePing(HttpExchange ex) throws IOException {
         Map<String, String> q = parseQuery(ex.getRequestURI().getRawQuery());
         String host = q.getOrDefault("host", "127.0.0.1");
-        try {
-            // [VULN-02] Command Injection (CWE-78 / OWASP A03:2021).
-            // Se concatena la entrada del usuario dentro de un comando del sistema.
-            Process p = Runtime.getRuntime().exec("ping -c 1 " + host);
-            byte[] out = p.getInputStream().readAllBytes();
-            respond(ex, 200, new String(out, StandardCharsets.UTF_8));
-        } catch (Exception e) {
-            respond(ex, 500, "error: " + e.getMessage());
+        if (!HOST_OK.matcher(host).matches()) {
+            respond(ex, 400, "host invalido");
+            return;
         }
+        ProcessBuilder pb = new ProcessBuilder("ping", "-c", "1", host);
+        pb.redirectErrorStream(true);
+        Process p = pb.start();
+        byte[] out = p.getInputStream().readAllBytes();
+        respond(ex, 200, new String(out, StandardCharsets.UTF_8));
     }
 
-    // ---- /file : Path Traversal ----
     private static void handleFile(HttpExchange ex) throws IOException {
         Map<String, String> q = parseQuery(ex.getRequestURI().getRawQuery());
         String name = q.getOrDefault("name", "index.txt");
-        try {
-            // [VULN-06] Path Traversal (CWE-22 / OWASP A01:2021).
-            // Sin validar 'name', ?name=../../etc/passwd escapa del directorio.
-            byte[] data = Files.readAllBytes(Paths.get("files/" + name));
-            respond(ex, 200, new String(data, StandardCharsets.UTF_8));
-        } catch (Exception e) {
-            respond(ex, 404, "not found: " + e.getMessage());
+        Path base = Paths.get("files").toAbsolutePath().normalize();
+        Path target = base.resolve(name).normalize();
+        if (!target.startsWith(base)) {
+            respond(ex, 400, "ruta invalida");
+            return;
         }
-    }
-
-    private static String md5(String s) throws Exception {
-        MessageDigest md = MessageDigest.getInstance("MD5");
-        byte[] d = md.digest(s.getBytes(StandardCharsets.UTF_8));
-        StringBuilder sb = new StringBuilder();
-        for (byte b : d) sb.append(String.format("%02x", b));
-        return sb.toString();
+        if (!Files.exists(target)) {
+            respond(ex, 404, "not found");
+            return;
+        }
+        byte[] data = Files.readAllBytes(target);
+        respond(ex, 200, new String(data, StandardCharsets.UTF_8));
     }
 
     private static Map<String, String> parseQuery(String raw) {
@@ -126,7 +134,7 @@ public class App {
             String[] kv = pair.split("=", 2);
             if (kv.length == 2) {
                 m.put(URLDecoder.decode(kv[0], StandardCharsets.UTF_8),
-                      URLDecoder.decode(kv[1], StandardCharsets.UTF_8));
+                        URLDecoder.decode(kv[1], StandardCharsets.UTF_8));
             }
         }
         return m;
